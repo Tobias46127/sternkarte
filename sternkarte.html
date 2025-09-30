@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sternenhimmel – Palermo 28.10.2007</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin:0; height:100%; background:#000; }
+    canvas { display:block; }
+    #overlay {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      color:#fff; font-family: system-ui, sans-serif; font-size: 16px;
+      background: rgba(0,0,0,.55); padding: 8px 12px; border-radius: 10px; z-index:10; text-align:center;
+      white-space: nowrap;
+    }
+    #shot {
+      position: fixed; top: 12px; right: 12px; z-index:10;
+      padding: 8px 12px; border: none; border-radius: 8px; background: #444; color:#fff; font-size:14px; cursor:pointer;
+    }
+    #hint {
+      position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+      color:#bbb; font-family: system-ui, sans-serif; font-size: 12px;
+      background: rgba(0,0,0,.35); padding: 6px 10px; border-radius: 10px; z-index:10;
+    }
+    /* Zeit-UI */
+    #timeBtn {
+      position: fixed; top: 12px; left: 12px; z-index: 10;
+      padding: 8px 10px; border: none; border-radius: 8px; background: #1e88e5; color:#fff; font-size:14px; cursor:pointer;
+    }
+    #timePanel {
+      position: fixed; top: 52px; left: 12px; z-index: 10;
+      display: none; gap: 6px; align-items: center;
+      background: rgba(0,0,0,.6); padding: 8px; border-radius: 10px; color:#fff; font-family: system-ui, sans-serif;
+    }
+    #timePanel input[type="time"] {
+      padding:6px 8px; border-radius:8px; border:1px solid #444; background:#0e0e0e; color:#fff;
+    }
+    #timePanel button {
+      padding:6px 8px; border:none; border-radius:8px; cursor:pointer; color:#fff; background:#444;
+    }
+    #timePanel button.primary { background:#1e88e5; }
+  </style>
+</head>
+<body>
+  <div id="overlay"> Palermo, 28.10.2007 · 13:00 CET (UTC+01:00)</div>
+  <button id="timeBtn">⏱ Zeit</button>
+  <div id="timePanel">
+    <button id="minus30">−30 min</button>
+    <input id="timeInput" type="time" step="60" value="13:00" />
+    <button id="plus30">+30 min</button>
+    <button id="applyTime" class="primary">Anwenden</button>
+  </div>
+  <button id="shot">Speichern 📸</button>
+  <div id="hint">Drag/Touch: drehen · Rad/Pinch: zoomen</div>
+
+  <!-- Three.js (ohne Module) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.149.0/three.min.js"></script>
+
+  <script>
+    // ===== Fixe Parameter (Ort/Datum) =====
+    const LAT = 38.1157;     // Palermo Breite (N)
+    const LON = 13.3617;     // Palermo Länge (E, positiv)
+    const DATE_STR = "2007-10-28";
+    let   TIME_STR = "13:00"; // initiale lokale Uhrzeit
+    const UTC_OFFSET_H = +1;  // CET
+
+    // ===== Radii / Grenzen (Kamera innerhalb Kuppel & über Boden) =====
+    const RADIUS = 1800;                // Sternhimmel-Radius
+    const SKY_RADIUS = RADIUS * 1.45;   // Milchstraßenkuppel
+    const SKY_MARGIN = 80;              // Sicherheitsabstand
+    const Y_MIN = 0.0;                  // nie unter den Horizont (y>=0)
+
+    // ===== Three.js Setup =====
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 5000);
+    const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // ===== Orbit-ähnliche Controls + unsichtbare Wände =====
+    let radius=1000, theta=0, phi=Math.PI/2;
+    const minR=250;                 // Mindestabstand vom Zentrum
+    const minPhi=0.05;              // nicht zu steil nach oben
+    const maxPhiHard=Math.PI-0.05;  // nie komplett nach unten
+
+    function clampControls() {
+      // Radius: innerhalb der Kuppel
+      const maxR = SKY_RADIUS - SKY_MARGIN;
+      radius = Math.min(Math.max(radius, minR), maxR);
+
+      // y = r * cos(phi) >= Y_MIN  ->  phi <= arccos(Y_MIN/r)
+      const ratio = Math.max(-1, Math.min(1, Y_MIN / radius));
+      const maxPhiDyn = Math.acos(ratio) - 0.01; // kleiner Puffer
+      const maxPhi = Math.min(maxPhiHard, maxPhiDyn);
+      if (phi > maxPhi) phi = maxPhi;
+      if (phi < minPhi) phi = minPhi;
+    }
+
+    function updateCam(){
+      clampControls();
+      const s=Math.sin(phi);
+      camera.position.set(radius*s*Math.cos(theta), radius*Math.cos(phi), radius*s*Math.sin(theta));
+      camera.lookAt(0,0,0);
+    }
+    updateCam();
+
+    // Pointer/Pinch/Wheel
+    const act=new Map(); let drag=false, sx=0, sy=0, sTh=0, sPh=0, lastPinch=null;
+    renderer.domElement.style.touchAction='none';
+    function pinch(){ const p=[...act.values()]; if(p.length<2) return null; return Math.hypot(p[0].x-p[1].x, p[0].y-p[1].y); }
+    function pd(e){ renderer.domElement.setPointerCapture(e.pointerId); act.set(e.pointerId,{x:e.clientX,y:e.clientY});
+      if(act.size===1){ drag=true; sx=e.clientX; sy=e.clientY; sTh=theta; sPh=phi; } else { drag=false; lastPinch=pinch(); } }
+    function pm(e){ if(!act.has(e.pointerId)) return; act.set(e.pointerId,{x:e.clientX,y:e.clientY});
+      if(act.size>=2){ const d=pinch(); if(lastPinch){ const sc=lastPinch/d; radius*=sc; updateCam(); } lastPinch=d; return; }
+      if(drag){ const dx=e.clientX-sx, dy=e.clientY-sy; theta=sTh-dx*0.005; phi=sPh-dy*0.005; updateCam(); } }
+    function pu(e){ act.delete(e.pointerId); if(act.size===0){ drag=false; lastPinch=null; } }
+    renderer.domElement.addEventListener('pointerdown',pd); window.addEventListener('pointermove',pm);
+    window.addEventListener('pointerup',pu); window.addEventListener('pointercancel',pu);
+    window.addEventListener('wheel', e=>{ e.preventDefault(); const f=1+Math.sign(e.deltaY)*0.08; radius*=f; updateCam(); }, {passive:false});
+
+    // ===== Astro-Funktionen =====
+    const DEG = Math.PI/180;
+    function jd(ms){ return ms/86400000 + 2440587.5; }
+    function gmstH(ms){ const JD=jd(ms), T=(JD-2451545)/36525;
+      let G=280.46061837 + 360.98564736629*(JD-2451545) + 0.000387933*T*T - (T*T*T)/38710000;
+      G=((G%360)+360)%360; return G/15;
+    }
+    function lstH(G, lon){ let L=G + lon/15; return ((L%24)+24)%24; }
+    function raDecToAltAz(raH, decD, latD, lstH){
+      const H=((lstH - raH)*15)*DEG, dec=decD*DEG, phiLat=latD*DEG;
+      const sinAlt=Math.sin(dec)*Math.sin(phiLat)+Math.cos(dec)*Math.cos(phiLat)*Math.cos(H);
+      const alt=Math.asin(sinAlt);
+      const y=-Math.sin(H)*Math.cos(dec);
+      const x= Math.sin(dec)*Math.cos(phiLat)-Math.cos(dec)*Math.sin(phiLat)*Math.cos(H);
+      const az=Math.atan2(y,x); return {alt,az};
+    }
+    function altAzToXYZ(alt,az,r){ const ca=Math.cos(alt), sa=Math.sin(alt); return [ca*Math.sin(az)*r, sa*r, ca*Math.cos(az)*r]; }
+    function utcFromLocal(dateStr,timeStr,offH){ const [Y,M,D]=dateStr.split('-').map(Number); const [h,m]=timeStr.split(':').map(Number);
+      return Date.UTC(Y,(M-1),D,h,m||0,0) - offH*3600*1000; }
+
+    // ===== Materialien =====
+    const matA=new THREE.PointsMaterial({ color:0xffffff, size:2.2, sizeAttenuation:true, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+    const matB=new THREE.PointsMaterial({ color:0xffffff, size:1.6, sizeAttenuation:true, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+    const matC=new THREE.PointsMaterial({ color:0xccccff, size:1.2, sizeAttenuation:true, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+    const lineSco=new THREE.LineBasicMaterial({ color:0xffd166 });
+    const matScoPts=new THREE.PointsMaterial({ color:0xffd166, size:4.2, sizeAttenuation:true, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+
+    let gStars=new THREE.Group(); scene.add(gStars);
+    let gLinesSco=new THREE.Group(); scene.add(gLinesSco);
+
+    // ===== Untergrund & Horizont – SCHÖNER =====
+    scene.fog = new THREE.FogExp2(0x000000, 0.00015);
+
+    function makeRadialGroundTexture() {
+      const size = 768; // etwas feiner
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const ctx = c.getContext('2d');
+
+      // weiches Zentrum -> dunkler Rand
+      const g = ctx.createRadialGradient(size/2, size/2, size*0.06, size/2, size/2, size*0.52);
+      g.addColorStop(0,   '#0b0f16');
+      g.addColorStop(0.6, '#070b12');
+      g.addColorStop(1,   '#05080d');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, size, size);
+
+      // Körnung (Grain)
+      const img = ctx.getImageData(0,0,size,size);
+      const d = img.data;
+      for (let i=0;i<d.length;i+=4){
+        const n = (Math.random()-0.5)*16; // -8..+8
+        d[i  ] = Math.min(255, Math.max(0, d[i  ] + n));
+        d[i+1] = Math.min(255, Math.max(0, d[i+1] + n));
+        d[i+2] = Math.min(255, Math.max(0, d[i+2] + n));
+      }
+      ctx.putImageData(img, 0, 0);
+
+      // Kompass-Radiallinien (sehr dezent)
+      ctx.save();
+      ctx.translate(size/2, size/2);
+      ctx.strokeStyle = 'rgba(180,200,255,0.07)';
+      ctx.lineWidth = 1;
+      for (let a=0; a<360; a+=30){
+        ctx.rotate(Math.PI/180 * 30);
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size*0.49, 0); ctx.stroke();
+      }
+      ctx.restore();
+
+      // Dünne konzentrische Kreise
+      ctx.strokeStyle = 'rgba(150,170,220,0.06)';
+      ctx.lineWidth = 1;
+      for (let r=0.18; r<=0.48; r+=0.06){
+        ctx.beginPath(); ctx.arc(size/2,size/2,size*r,0,Math.PI*2); ctx.stroke();
+      }
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy?.() || 1;
+      return tex;
+    }
+
+    // Boden-Scheibe (knapp unter y=0)
+    const groundTex = makeRadialGroundTexture();
+    const groundGeo = new THREE.CircleGeometry(RADIUS * 1.10, 256);
+    const groundMat = new THREE.MeshBasicMaterial({
+      map: groundTex, transparent: true, opacity: 0.98, side: THREE.DoubleSide
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -2;
+    scene.add(ground);
+
+    // Horizont-Ring (dunkler Rand)
+    const ringGeo = new THREE.RingGeometry(RADIUS * 1.00, RADIUS * 1.02, 256);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x223344, transparent: true, opacity: 0.85, side: THREE.DoubleSide
+    });
+    const horizon = new THREE.Mesh(ringGeo, ringMat);
+    horizon.rotation.x = -Math.PI / 2;
+    horizon.position.y = -0.5;
+    scene.add(horizon);
+
+    // Atmosphärischer Horizont-Glow (Zylinder mit vertikalem Gradient)
+    function makeVerticalGradientTexture() {
+      const w=256, h=512;
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      const ctx=c.getContext('2d');
+      const g=ctx.createLinearGradient(0,h,0,0);
+      g.addColorStop(0.00,'rgba(255,215,180,0.00)'); // unten transparent
+      g.addColorStop(0.25,'rgba(255,220,190,0.10)');
+      g.addColorStop(0.60,'rgba(200,220,255,0.14)');
+      g.addColorStop(1.00,'rgba(150,200,255,0.00)'); // oben ausblenden
+      ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+      const tex=new THREE.CanvasTexture(c);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.repeat.set(6,1); // öfter um den Kreis
+      return tex;
+    }
+    const glowTex = makeVerticalGradientTexture();
+    const glowGeo = new THREE.CylinderGeometry(RADIUS*1.01, RADIUS*1.01, 220, 128, 1, true);
+    const glowMat = new THREE.MeshBasicMaterial({ map: glowTex, side: THREE.DoubleSide, transparent:true, depthWrite:false });
+    const horizonGlow = new THREE.Mesh(glowGeo, glowMat);
+    horizonGlow.position.y = 110 - 1; // halbe Höhe - 1 -> symmetrisch um y=0
+    scene.add(horizonGlow);
+
+    // Kompass-Tickmarks (10° kurz, 30° lang)
+    function addAzimuthTicks(){
+      const innerR = RADIUS*1.00, shortR = RADIUS*1.015, longR = RADIUS*1.03;
+      const verts = [];
+      for (let deg=0; deg<360; deg+=10){
+        const rad = deg * Math.PI/180;
+        const sin = Math.sin(rad), cos = Math.cos(rad);
+        const r2 = (deg % 30 === 0) ? longR : shortR;
+        // in unserer Welt: X=sin(az), Z=cos(az)
+        verts.push(innerR*sin, -0.5, innerR*cos,  r2*sin, -0.5, r2*cos);
+      }
+      const g=new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(verts),3));
+      const m=new THREE.LineBasicMaterial({ color:0x7fa2ff, transparent:true, opacity:0.25 });
+      const lines=new THREE.LineSegments(g,m);
+      scene.add(lines);
+    }
+    addAzimuthTicks();
+
+    // Kompass-Labels (N/O/S/W)
+    function makeLabelSprite(text){
+      const size=256;
+      const cnv=document.createElement('canvas'); cnv.width=cnv.height=size;
+      const ctx=cnv.getContext('2d');
+      ctx.clearRect(0,0,size,size);
+      ctx.font='bold 72px system-ui';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      // Outline
+      ctx.lineWidth=8; ctx.strokeStyle='rgba(0,0,0,0.5)';
+      ctx.strokeText(text, size/2, size/2);
+      // Fill
+      ctx.fillStyle='#a9c7ff';
+      ctx.fillText(text, size/2, size/2);
+      const tex=new THREE.CanvasTexture(cnv);
+      return new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent:true, depthWrite:false }));
+    }
+    function addCardinalLabels(){
+      const r = RADIUS*1.07, y = 20;
+      const labels = [
+        {t:'N', az:0},
+        {t:'O', az:90},   // Osten (E)
+        {t:'S', az:180},
+        {t:'W', az:270}
+      ];
+      for (const L of labels){
+        const a = L.az * Math.PI/180;
+        const x = r*Math.sin(a), z = r*Math.cos(a);
+        const s = makeLabelSprite(L.t);
+        s.position.set(x, y, z);
+        s.scale.set(140, 140, 1);
+        scene.add(s);
+      }
+    }
+    addCardinalLabels();
+
+    // ===== Milchstraße (Glow) =====
+    function makeMilkyWayTexture(w=1024, h=512){
+      const cnv = document.createElement('canvas');
+      cnv.width = w; cnv.height = h;
+      const ctx = cnv.getContext('2d');
+      const img = ctx.createImageData(w, h);
+      const data = img.data;
+
+      // galaktischer Nordpol (J2000)
+      const raNP = 192.85948 * Math.PI/180;
+      const decNP = 27.12825 * Math.PI/180;
+      const nx = Math.cos(decNP)*Math.cos(raNP);
+      const ny = Math.cos(decNP)*Math.sin(raNP);
+      const nz = Math.sin(decNP);
+
+      const sigma = (12 * Math.PI/180); // Bandbreite ~12°
+      function fract(x){ return x - Math.floor(x); }
+
+      for (let y=0; y<h; y++){
+        const v = (y + 0.5) / h;
+        const lat = (v - 0.5) * Math.PI;
+        const cl = Math.cos(lat), sl = Math.sin(lat);
+        for (let x=0; x<w; x++){
+          const u = (x + 0.5) / w;
+          const lon = u * 2 * Math.PI;
+          const vx = cl * Math.cos(lon);
+          const vy = cl * Math.sin(lon);
+          const vz = sl;
+
+          const s = vx*nx + vy*ny + vz*nz;
+          const ang = Math.asin(Math.max(-1, Math.min(1, s)));
+          let d = Math.abs(ang);
+
+          let b = Math.exp(-(d*d) / (2*sigma*sigma));
+          const lmod = 0.6 + 0.4 * Math.sin(lon*2.0 + 0.5);
+          b *= lmod;
+          const n = fract(Math.sin((x*12.9898 + y*78.233)) * 43758.5453);
+          b *= (0.85 + 0.3*(n-0.5));
+          b = Math.max(0, Math.min(1, b));
+
+          const i = (y*w + x) * 4;
+          data[i+0] = Math.floor(255 * b);
+          data[i+1] = Math.floor(235 * b);
+          data[i+2] = Math.floor(210 * b);
+          data[i+3] = Math.floor(255 * 0.45 * b);
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(cnv);
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy?.() || 1;
+      return tex;
+    }
+
+    const mwTex = makeMilkyWayTexture(1024, 512);
+    const skyGeo = new THREE.SphereGeometry(SKY_RADIUS, 64, 48);
+    const skyMat = new THREE.MeshBasicMaterial({
+      map: mwTex, side: THREE.BackSide, transparent: true, opacity: 0.8,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    const milkyWay = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(milkyWay);
+
+    // ===== Daten (einmal) laden =====
+    let loadedStars = null;
+    let scoFeatures = null;
+
+    Promise.all([
+      fetch('assets/stars/stars.6.json').then(r=>r.json()),
+      fetch('assets/constellations/iau_lines.json').then(r=>r.json())
+    ]).then(([starJSON, lineJSON]) => {
+      loadedStars = normalizeStars(starJSON); // -> [{raH, dec, mag}, ...]
+      const feats = lineJSON.features || [];
+      scoFeatures = feats.filter(f => (f.id || f.properties?.id || '').trim() === 'Sco');
+      // initialer Build
+      rebuildSky(TIME_STR);
+    }).catch(err=>{
+      console.error(err);
+      alert('Konnte Daten nicht laden. Prüfe Pfade:\nassets/stars/stars.6.json\nassets/constellations/iau_lines.json');
+    });
+
+    // ===== Build/Render für eine Uhrzeit =====
+    function rebuildSky(timeStr){
+      if (!loadedStars || !scoFeatures) return;
+
+      // Overlay aktualisieren
+      document.getElementById('overlay').textContent =
+        ` Palermo, ${DATE_STR} · ${timeStr} CET (UTC+01:00) `;
+
+      // Gruppen leeren & Geometrien entsorgen
+      disposeGroup(gStars); disposeGroup(gLinesSco);
+
+      // Zeit -> LST
+      const whenUTC = utcFromLocal(DATE_STR, timeStr, UTC_OFFSET_H);
+      const GMST = gmstH(whenUTC);
+      const LST = lstH(GMST, LON);
+
+      // Sterne
+      const posA=[], posB=[], posC=[];
+      for (const s of loadedStars){
+        const {alt,az}=raDecToAltAz(s.raH, s.dec, LAT, LST);
+        if(alt<=0) continue;
+        const [x,y,z]=altAzToXYZ(alt,az,RADIUS);
+        if (s.mag<=2.0) posA.push(x,y,z);
+        else if (s.mag<=4.0) posB.push(x,y,z);
+        else posC.push(x,y,z);
+      }
+      makePoints(posC,matC); makePoints(posB,matB); makePoints(posA,matA);
+
+      // Skorpion-Linien (nur über dem Horizont)
+      const vertsSco=[];
+      for (const f of scoFeatures){
+        const polys=f.geometry?.coordinates||[];
+        for (const poly of polys){
+          for (let i=0;i<poly.length-1;i++){
+            const [ra1d,dec1d]=poly[i], [ra2d,dec2d]=poly[i+1];
+            const a1=raDecToAltAz(ra1d/15, dec1d, LAT, LST);
+            const a2=raDecToAltAz(ra2d/15, dec2d, LAT, LST);
+            if (a1.alt>0 && a2.alt>0){
+              const p1=altAzToXYZ(a1.alt,a1.az,RADIUS), p2=altAzToXYZ(a2.alt,a2.az,RADIUS);
+              vertsSco.push(...p1,...p2);
+            }
+          }
+        }
+      }
+      if (vertsSco.length) addLines(vertsSco, lineSco, gLinesSco);
+
+      // Skorpion-Hauptsterne
+      const SCO_HL = [
+        { raH:16.48, dec:-26.4 }, // Antares
+        { raH:16.00, dec:-22.7 }, // Dschubba
+        { raH:16.05, dec:-19.8 }, // Acrab
+        { raH:16.83, dec:-34.3 }, // Epsilon
+        { raH:16.96, dec:-42.4 }, // Zeta
+        { raH:17.55, dec:-37.1 }, // Shaula
+        { raH:17.62, dec:-43.0 }  // Sargas
+      ];
+      const scoPts=[];
+      for (const s of SCO_HL){
+        const {alt,az}=raDecToAltAz(s.raH, s.dec, LAT, LST);
+        if (alt>0) scoPts.push(...altAzToXYZ(alt, az, RADIUS));
+      }
+      if (scoPts.length) makePoints(scoPts, matScoPts);
+    }
+
+    // ===== Zeit-UI Logik =====
+    const timeBtn = document.getElementById('timeBtn');
+    const timePanel = document.getElementById('timePanel');
+    const timeInput = document.getElementById('timeInput');
+    const minus30 = document.getElementById('minus30');
+    const plus30 = document.getElementById('plus30');
+    const applyTime = document.getElementById('applyTime');
+
+    timeBtn.onclick = () => {
+      timePanel.style.display = timePanel.style.display === 'none' ? 'flex' : 'none';
+    };
+
+    function pad2(n){ return String(n).padStart(2, '0'); }
+    function shiftMinutes(hhmm, delta){
+      let [h,m] = hhmm.split(':').map(Number);
+      let total = h*60 + m + delta;
+      total = ((total % (24*60)) + (24*60)) % (24*60);
+      const nh = Math.floor(total/60), nm = total % 60;
+      return `${pad2(nh)}:${pad2(nm)}`;
+    }
+
+    minus30.onclick = () => { timeInput.value = shiftMinutes(timeInput.value, -30); rebuildSky(timeInput.value); };
+    plus30.onclick  = () => { timeInput.value = shiftMinutes(timeInput.value, +30); rebuildSky(timeInput.value); };
+    applyTime.onclick = () => { TIME_STR = timeInput.value; rebuildSky(TIME_STR); };
+
+    // ===== Hilfsfunktionen =====
+    function disposeGroup(g){
+      for (const c of [...g.children]){
+        if (c.geometry) c.geometry.dispose();
+        g.remove(c);
+      }
+    }
+    function normalizeStars(data){
+      // d3-celestial: FeatureCollection -> geometry.coordinates [ra_deg, dec_deg], properties.mag
+      if (data && data.type==='FeatureCollection' && Array.isArray(data.features)){
+        const out=[];
+        for (const f of data.features){
+          const c=f.geometry?.coordinates||[0,0];
+          const mag=(f.properties&&('mag' in f.properties)) ? +f.properties.mag : 6.5;
+          out.push({ raH: (+c[0])/15, dec: (+c[1]), mag });
+        }
+        return out;
+      }
+      if (Array.isArray(data)){
+        return data.map(s=>({ raH: (s.ra>24? s.ra/15 : s.ra), dec:+s.dec, mag:+s.mag }));
+      }
+      return [];
+    }
+    function makePoints(arr, mat){
+      if(!arr.length) return;
+      const g=new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(arr),3));
+      gStars.add(new THREE.Points(g, mat));
+    }
+    function addLines(arr, mat, group){
+      const g=new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(arr),3));
+      group.add(new THREE.LineSegments(g, mat));
+    }
+
+    // ===== Loop & Utils =====
+    function animate(){ requestAnimationFrame(animate);
+      gStars.rotation.y += 0.00025;
+      gLinesSco.rotation.y += 0.00025;
+      renderer.render(scene,camera);
+    } animate();
+
+    window.addEventListener('resize', ()=>{
+      renderer.setSize(innerWidth,innerHeight);
+      camera.aspect=innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      updateCam();
+    });
+
+    document.getElementById('shot').onclick = () => {
+      const a=document.createElement('a');
+      a.download='sternenhimmel_palermo_2007-10-28.png';
+      a.href=renderer.domElement.toDataURL('image/png');
+      a.click();
+    };
+  </script>
+</body>
+</html>
